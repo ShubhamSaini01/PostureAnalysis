@@ -12,7 +12,7 @@ from datetime import datetime
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
-# folders
+# ensure folders
 os.makedirs("snapshots", exist_ok=True)
 os.makedirs("reports", exist_ok=True)
 
@@ -22,11 +22,10 @@ DISP_WINDOW = 10              # number of frames to compute average displacement
 DISP_THRESHOLD_RATIO = 0.008  # displacement threshold relative to image diagonal (smaller = stricter)
 MIN_FRAMES_FOR_POSE = 6       # require some frames with pose to start stability checks
 FPS_SMOOTH = 6
-# levelness score fallback (optional)
 AUTO_ENABLED = True
 # --------------------------------
 
-# optional audio
+# optional audio (simpleaudio recommended, fallback to terminal bell)
 _use_simpleaudio = False
 try:
     import simpleaudio as sa
@@ -53,12 +52,11 @@ def play_beep():
             pass
     print("\a", end="", flush=True)
 
-# helpers
+# helper functions
 def normalized_landmark(lm, w, h):
-    return (lm.x * w, lm.y * h)  # keep float for displacement accuracy
+    return (lm.x * w, lm.y * h)
 
 def angle_at(p1, p2, p3):
-    # angle at p2 formed by p1->p2->p3 (degrees)
     a = np.array(p1) - np.array(p2)
     b = np.array(p3) - np.array(p2)
     denom = (np.linalg.norm(a) * np.linalg.norm(b))
@@ -68,22 +66,18 @@ def angle_at(p1, p2, p3):
     return math.degrees(math.acos(cosang))
 
 def line_angle_deg(p1, p2):
-    # angle of line p1->p2 relative to horizontal in degrees
     dx = p2[0] - p1[0]
     dy = p2[1] - p1[1]
     return math.degrees(math.atan2(dy, dx))
 
-# compute metrics
+# compute metrics (angles & points)
 def compute_all_metrics(landmarks, w, h):
-    # returns numeric dict with left/right angles and front metrics
     L = mp_pose.PoseLandmark
-    # points we need - fallback to 0 if missing
     def pt(idx):
         lm = landmarks[idx.value]
         return normalized_landmark(lm, w, h)
 
     pts = {}
-    # core points
     idxs = [
         L.LEFT_SHOULDER, L.RIGHT_SHOULDER, L.LEFT_HIP, L.RIGHT_HIP,
         L.NOSE, L.LEFT_KNEE, L.RIGHT_KNEE, L.LEFT_ANKLE, L.RIGHT_ANKLE,
@@ -92,37 +86,29 @@ def compute_all_metrics(landmarks, w, h):
     for idn in idxs:
         pts[idn.name.lower()] = pt(idn)
 
-    # front metrics
     ls = pts['left_shoulder']; rs = pts['right_shoulder']
     lh = pts['left_hip']; rh = pts['right_hip']
     nose = pts['nose']
     la = pts['left_ankle']; ra = pts['right_ankle']
     lfoot = pts['left_foot_index']; rfoot = pts['right_foot_index']
 
-    shoulder_tilt = line_angle_deg(ls, rs)   # degrees (image coords; sign matters)
+    shoulder_tilt = line_angle_deg(ls, rs)
     hip_tilt = line_angle_deg(lh, rh)
     mid_shoulders = ((ls[0]+rs[0])/2.0, (ls[1]+rs[1])/2.0)
     head_tilt = math.degrees(math.atan2(nose[1]-mid_shoulders[1], nose[0]-mid_shoulders[0]))
     mid_ankles_x = (la[0] + ra[0]) / 2.0
     lateral_shift_norm = (mid_ankles_x - mid_shoulders[0]) / w
-
-    # pelvic tilt - same as hip_tilt but return absolute magnitude & sign
     pelvic_tilt = hip_tilt
 
-    # Side/leg angles (knee, ankle)
-    # knee angle (hip - knee - ankle)
     left_knee_angle = angle_at(pts['left_hip'], pts['left_knee'], pts['left_ankle'])
     right_knee_angle = angle_at(pts['right_hip'], pts['right_knee'], pts['right_ankle'])
-    # ankle angle (knee - ankle - foot_index) or knee-ankle-heel fallback
     left_ankle_angle = angle_at(pts['left_knee'], pts['left_ankle'], pts['left_foot_index'])
     right_ankle_angle = angle_at(pts['right_knee'], pts['right_ankle'], pts['right_foot_index'])
-    # if foot_index missing (zeros) the angle might be 0; try heel
     if np.allclose(pts['left_foot_index'], (0.0, 0.0)):
         left_ankle_angle = angle_at(pts['left_knee'], pts['left_ankle'], pts['left_heel'])
     if np.allclose(pts['right_foot_index'], (0.0, 0.0)):
         right_ankle_angle = angle_at(pts['right_knee'], pts['right_ankle'], pts['right_heel'])
 
-    # assemble
     out = {
         "shoulder_tilt_deg": shoulder_tilt,
         "hip_tilt_deg": hip_tilt,
@@ -137,10 +123,8 @@ def compute_all_metrics(landmarks, w, h):
     }
     return out
 
-# short textual imbalance interpretation
 def interpret_report(metrics):
     msgs = []
-    # shoulders
     s = abs(metrics['shoulder_tilt_deg'])
     if s < 5:
         msgs.append(("Shoulders", "Level"))
@@ -149,7 +133,6 @@ def interpret_report(metrics):
     else:
         msgs.append(("Shoulders", f"Marked tilt ({s:.1f}°)"))
 
-    # pelvis
     p = abs(metrics['pelvic_tilt_deg'])
     if p < 5:
         msgs.append(("Pelvis", "Level"))
@@ -158,7 +141,6 @@ def interpret_report(metrics):
     else:
         msgs.append(("Pelvis", f"Marked pelvic obliquity ({p:.1f}°)"))
 
-    # lateral shift
     ls = abs(metrics['lateral_shift_norm'])
     if ls < 0.03:
         msgs.append(("Weight", "Centered"))
@@ -167,21 +149,19 @@ def interpret_report(metrics):
     else:
         msgs.append(("Weight", "Notable lateral shift"))
 
-    # knees and ankles (rough guidance)
     lk = metrics['left_knee_deg']; rk = metrics['right_knee_deg']
     if lk < 160:
         msgs.append(("Left knee", f"Flexed/forward angle {lk:.1f}°"))
     if rk < 160:
         msgs.append(("Right knee", f"Flexed/forward angle {rk:.1f}°"))
 
-    # ankles
     la = metrics['left_ankle_deg']; ra = metrics['right_ankle_deg']
     msgs.append(("Left ankle", f"{la:.1f}°"))
     msgs.append(("Right ankle", f"{ra:.1f}°"))
 
     return msgs
 
-# save report + csv logging
+# CSV setup
 CSV_PATH = os.path.join("reports", "metrics.csv")
 CSV_HEADER = [
     "timestamp","mode","image","shoulder_tilt_deg","hip_tilt_deg","pelvic_tilt_deg","head_tilt_deg",
@@ -206,7 +186,6 @@ def save_report_and_snapshot(frame, mode, metrics, notes=None):
     report_name = os.path.join("reports", f"report_{ts}.json")
     with open(report_name, "w") as rf:
         json.dump(report, rf, indent=2)
-    # append CSV
     with open(CSV_PATH, "a", newline="") as f:
         w = csv.writer(f)
         row = [
@@ -219,13 +198,8 @@ def save_report_and_snapshot(frame, mode, metrics, notes=None):
     play_beep()
     print(f"[SNAPSHOT] {img_name}  report -> {report_name}")
 
-# stability / movement detection helpers
-def landmarks_centroid(pts):
-    arr = np.array(list(pts.values()))
-    return np.mean(arr, axis=0)
-
+# movement detection helpers
 def avg_disp_between_frames(ptsA, ptsB):
-    # average Euclidean displacement across common keys
     tot = 0.0; n=0
     for k in ptsA.keys():
         pa = np.array(ptsA[k]); pb = np.array(ptsB.get(k, pa))
@@ -233,7 +207,6 @@ def avg_disp_between_frames(ptsA, ptsB):
         tot += d; n+=1
     return (tot / n) if n>0 else 0.0
 
-# robust camera open (try indices / device paths)
 def open_camera_robust():
     import glob
     candidates = []
@@ -258,7 +231,7 @@ def open_camera_robust():
                 cap.release()
     return None
 
-# ------------- Main loop -------------
+# ----------------- Main -----------------
 def main():
     cap = open_camera_robust()
     if cap is None:
@@ -277,7 +250,6 @@ def main():
     print("Controls: f=front l=side b=back s=manual snap g=force autosnap c=save baseline as baseline.json q=quit")
 
     baseline = None
-    # load baseline if present
     if os.path.exists("baseline.json"):
         try:
             baseline = json.load(open("baseline.json","r"))
@@ -295,11 +267,13 @@ def main():
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = mp_pose_instance.process(frame_rgb)
 
+        # defaults for display (avoid UnboundLocalError)
+        avg_disp = 0.0
+        norm_disp = 1.0
+
         if results.pose_landmarks:
             pose_frames += 1
-            # build landmarks dict of x,y floats
             lm = results.pose_landmarks.landmark
-            # collect only a subset we use for movement calculation (key joints)
             keys = [
                 mp_pose.PoseLandmark.LEFT_SHOULDER, mp_pose.PoseLandmark.RIGHT_SHOULDER,
                 mp_pose.PoseLandmark.LEFT_HIP, mp_pose.PoseLandmark.RIGHT_HIP,
@@ -311,26 +285,19 @@ def main():
             for k in keys:
                 pts[k.name] = normalized_landmark(lm[k.value], w, h)
 
-            # compute displacement vs prev frame and push into window
             if prev_pts is not None:
                 disp = avg_disp_between_frames(pts, prev_pts)
                 disp_window.append(disp)
             prev_pts = pts
 
-            # compute average displacement normalized by diagonal
             if len(disp_window) >= 1:
                 avg_disp = float(np.mean(disp_window))
                 diag = math.hypot(w,h)
                 norm_disp = avg_disp / diag
-            else:
-                norm_disp = 1.0
 
-            # compute metrics for overlay & possible report
             metrics = compute_all_metrics(lm, w, h)
 
-            # draw landmarks and overlays
             mp_drawing.draw_landmarks(frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-            # draw shoulder & hip lines
             ls_pt = (int(metrics['points']['left_shoulder'][0]), int(metrics['points']['left_shoulder'][1]))
             rs_pt = (int(metrics['points']['right_shoulder'][0]), int(metrics['points']['right_shoulder'][1]))
             lh_pt = (int(metrics['points']['left_hip'][0]), int(metrics['points']['left_hip'][1]))
@@ -338,51 +305,41 @@ def main():
             cv2.line(frame, ls_pt, rs_pt, (0,255,0), 2)
             cv2.line(frame, lh_pt, rh_pt, (255,0,0), 2)
 
-            # show numeric readout
             cv2.putText(frame, f"Sdeg:{metrics['shoulder_tilt_deg']:+.1f} Hdeg:{metrics['hip_tilt_deg']:+.1f} Lshift:{metrics['lateral_shift_norm']:+.3f}",
                         (10,20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (240,240,240), 2)
 
-            # show displacement and stability status
             cv2.putText(frame, f"Mov avg(pixels): {avg_disp:.1f}  norm: {norm_disp:.4f}", (10,45), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,200), 1)
 
-            # stability decision: require enough pose frames and low norm_disp for STABLE_SECONDS
             if pose_frames >= MIN_FRAMES_FOR_POSE and norm_disp <= DISP_THRESHOLD_RATIO:
                 if stable_start_time is None:
                     stable_start_time = time.time()
                 elapsed = time.time() - stable_start_time
                 cv2.putText(frame, f"STABLE: {elapsed:.2f}s (need {STABLE_SECONDS}s)", (10,75), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,200,0), 2)
-                # if stable long enough -> auto capture
                 if AUTO_ENABLED and elapsed >= STABLE_SECONDS:
-                    # interpret and save
                     notes = [m[0] + ": " + m[1] for m in interpret_report(metrics)]
                     save_report_and_snapshot(frame.copy(), view_mode, metrics, notes=notes)
                     stable_start_time = None
                     disp_window.clear()
                     pose_frames = 0
-                    # small pause to avoid immediate re-trigger
                     time.sleep(0.6)
             else:
-                # not stable: reset timer
                 if stable_start_time is not None:
                     stable_start_time = None
                 cv2.putText(frame, f"STABLE: 0.00s (move to stop)", (10,75), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (80,80,80), 2)
 
         else:
-            # no pose
             prev_pts = None
             disp_window.clear()
             pose_frames = 0
             stable_start_time = None
             cv2.putText(frame, "No pose detected - move into frame", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,200,200), 2)
 
-        # footer & controls
         cv2.putText(frame, f"Mode:{view_mode.upper()}  (f:front l:side b:back s:manual g:force c:set baseline q:quit)", (10, h-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220,220,220), 1)
 
         cv2.imshow("Posture AutoCapture + Report", frame)
         key = cv2.waitKey(1) & 0xFF
-        # fps smoothing
         fps_est.append(1.0 / max(1e-6, time.time()-t0))
-        # keys
+
         if key == ord('q') or key == 27:
             break
         elif key == ord('f'):
@@ -392,19 +349,16 @@ def main():
         elif key == ord('b'):
             view_mode = "back"
         elif key == ord('s'):
-            # manual snapshot + report
             if results and results.pose_landmarks:
                 metrics = compute_all_metrics(results.pose_landmarks.landmark, w, h)
                 notes = [m[0] + ": " + m[1] for m in interpret_report(metrics)]
                 save_report_and_snapshot(frame.copy(), view_mode, metrics, notes=notes)
         elif key == ord('g'):
-            # forced auto-snap (test)
             if results and results.pose_landmarks:
                 metrics = compute_all_metrics(results.pose_landmarks.landmark, w, h)
                 notes = [m[0] + ": " + m[1] for m in interpret_report(metrics)]
                 save_report_and_snapshot(frame.copy(), view_mode, metrics, notes=notes)
         elif key == ord('c'):
-            # save baseline
             if results and results.pose_landmarks:
                 metrics = compute_all_metrics(results.pose_landmarks.landmark, w, h)
                 baseline_data = {k:metrics[k] for k in metrics if k!="points"}
@@ -412,7 +366,6 @@ def main():
                 with open("baseline.json","w") as bf:
                     json.dump(baseline_data, bf, indent=2)
                 print("Saved baseline.json")
-        # end loop
 
     cap.release()
     cv2.destroyAllWindows()
